@@ -52,7 +52,7 @@ import java.util.TreeMap;
  */
 final class IndexWriterV2 extends IndexWriterImpl{
     static final int MIN_VERSION = 6;
-    static final int MAX_VERSION = 9;
+    static final int MAX_VERSION = 10;
 
     // babelfish (no h)
     private static final int MAGIC = 0xBABE1F15;
@@ -82,9 +82,9 @@ final class IndexWriterV2 extends IndexWriterImpl{
     private static final int AVALUE_NESTED = 13;
     private static final int HAS_ENCLOSING_METHOD = 1;
     private static final int NO_ENCLOSING_METHOD = 0;
-    private static final int NO_NESTING = 0;
     private static final int HAS_NESTING = 1;
-
+    private static final int HAS_FIELD_SORT = 1 << 3;
+    private static final int HAS_METHOD_SORT = 1 << 4;
 
     private final OutputStream out;
 
@@ -485,9 +485,18 @@ final class IndexWriterV2 extends IndexWriterImpl{
         boolean hasNesting = clazz.nestingType() != ClassInfo.NestingType.TOP_LEVEL;
 
         if (version >= 9) {
-            int mask = NO_NESTING;
+            int mask = 0;
             if (hasNesting) {
                 mask = (enclosingMethod != null ? HAS_ENCLOSING_METHOD << 1 : 0) | HAS_NESTING;
+            }
+
+            if (version >= 10) {
+                if (clazz.fieldSortArray() != null) {
+                    mask |= HAS_FIELD_SORT;
+                }
+                if (clazz.methodSortArray() != null) {
+                    mask |= HAS_METHOD_SORT;
+                }
             }
             stream.writeByte(mask);
         }
@@ -517,16 +526,24 @@ final class IndexWriterV2 extends IndexWriterImpl{
         // Annotation length is early to allow eager allocation in reader.
         stream.writePackedU32(clazz.annotations().size());
 
-        FieldInternal[] fields = clazz.fieldArray();
-        stream.writePackedU32(fields.length);
+        List<FieldInternal> fields = clazz.fieldIterate(version < 10);
+        stream.writePackedU32(fields.size());
         for (FieldInternal field : fields) {
             stream.writePackedU32(positionOf(field));
         }
 
-        MethodInternal[] methods = clazz.methodArray();
-        stream.writePackedU32(methods.length);
+        if (version >= 10 && clazz.fieldSortArray() != null) {
+            stream.write(clazz.fieldSortArray());
+        }
+
+        List<MethodInternal> methods = clazz.methodIterate(version < 10);
+        stream.writePackedU32(methods.size());
         for (MethodInternal method : methods) {
             stream.writePackedU32(positionOf(method));
+        }
+
+        if (version >= 10 && clazz.methodSortArray() != null) {
+             stream.write(clazz.methodSortArray());
         }
 
         Set<Entry<DotName, List<AnnotationInstance>>> entrySet = clazz.annotations().entrySet();

@@ -18,10 +18,13 @@
 
 package org.jboss.jandex;
 
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.util.AbstractList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 
@@ -47,16 +50,21 @@ import java.util.Map;
  */
 public final class ClassInfo implements AnnotationTarget {
 
+    private static final int MAX_LINEAR = 4;
+    private static final int MAX_DECL_RETAIN = 256;
     private final DotName name;
     private final Map<DotName, List<AnnotationInstance>> annotations;
 
     // Not final to allow lazy initialization, immutable once published
-    private  short flags;
+    private short flags;
     private Type[] interfaceTypes;
     private Type superClassType;
     private Type[] typeParameters;
-    private MethodInternal[] methods;
     private FieldInternal[] fields;
+    private MethodInternal[] methods;
+    private byte[] fieldSort;
+    private byte[] methodSort;
+
     private boolean hasNoArgsConstructor;
     private NestingInfo nestingInfo;
 
@@ -321,8 +329,8 @@ public final class ClassInfo implements AnnotationTarget {
      */
     public final MethodInfo method(String name, Type... parameters) {
         MethodInternal key = new MethodInternal(Utils.toUTF8(name), MethodInternal.EMPTY_PARAMETER_NAMES, parameters, null, (short) 0);
-        int i = Arrays.binarySearch(methods, key, MethodInternal.NAME_AND_PARAMETER_COMPONENT_COMPARATOR);
-        return i >= 0 ? new MethodInfo(this, methods[i]) : null;
+        int i = search(key, methods, methodSort, MethodInternal.NAME_AND_PARAMETER_COMPONENT_COMPARATOR);
+        return i >= 0 ? new MethodInfo(this, lookupMember(i, methods, methodSort)) : null;
     }
 
     /**
@@ -336,12 +344,12 @@ public final class ClassInfo implements AnnotationTarget {
      */
     public final MethodInfo firstMethod(String name) {
         MethodInternal key = new MethodInternal(Utils.toUTF8(name), MethodInternal.EMPTY_PARAMETER_NAMES, Type.EMPTY_ARRAY, null, (short) 0);
-        int i = Arrays.binarySearch(methods, key, MethodInternal.NAME_AND_PARAMETER_COMPONENT_COMPARATOR);
+        int i = search(key, methods, methodSort, MethodInternal.NAME_AND_PARAMETER_COMPONENT_COMPARATOR);
         if (i < -methods.length) {
             return null;
         }
 
-        MethodInfo method = new MethodInfo(this,i >= 0 ? methods[i] : methods[++i * -1]);
+        MethodInfo method = new MethodInfo(this, lookupMember(i >= 0 ? i : (++i * -1), methods, methodSort));
         return method.name().equals(name) ? method : null;
     }
 
@@ -354,12 +362,12 @@ public final class ClassInfo implements AnnotationTarget {
      */
     public final FieldInfo field(String name) {
         FieldInternal key = new FieldInternal(Utils.toUTF8(name), VoidType.VOID, (short)0);
-        int i = Arrays.binarySearch(fields, key, FieldInternal.NAME_COMPARATOR);
+        int i = search(key, fields, fieldSort, FieldInternal.NAME_COMPARATOR);
         if (i < 0) {
             return null;
         }
 
-        return new FieldInfo(this, fields[i]);
+        return new FieldInfo(this, lookupMember(i, fields, fieldSort));
     }
 
     /**
@@ -377,6 +385,69 @@ public final class ClassInfo implements AnnotationTarget {
         return fields;
     }
 
+    final byte[] fieldSortArray() {
+        return fieldSort;
+    }
+
+    final void setFieldSortArray(byte[] fieldSort) {
+        this.fieldSort = fieldSort;
+    }
+
+    final byte[] methodSortArray() {
+        return methodSort;
+    }
+
+    final void setMethodSortArray(byte[] methodSort) {
+        this.methodSort = methodSort;
+    }
+
+
+    final List<FieldInternal> fieldIterate(final boolean sorted) {
+        final FieldInternal[] fields;
+
+        if (sorted && this.fields.length <= MAX_LINEAR) {
+            fields = this.fields.clone();
+            Arrays.sort(fields, FieldInternal.NAME_COMPARATOR);
+        } else {
+            fields = this.fields;
+        }
+
+        return new AbstractList<FieldInternal>() {
+
+            @Override
+            public FieldInternal get(int index) {
+                return sorted && fieldSort != null ? fields[fieldSort[index] & 0xFF] : fields[index];
+            }
+
+            @Override
+            public int size() {
+                return fields.length;
+            }
+        };
+    }
+
+    final List<MethodInternal> methodIterate(final boolean sorted) {
+        final MethodInternal[] methods;
+
+        if (sorted && this.methods.length <= MAX_LINEAR) {
+            methods = this.methods.clone();
+            Arrays.sort(methods, MethodInternal.NAME_AND_PARAMETER_COMPONENT_COMPARATOR);
+        } else {
+            methods = this.methods;
+        }
+
+        return new AbstractList<MethodInternal>() {
+            @Override
+            public MethodInternal get(int index) {
+                return sorted && methodSort != null ? methods[methodSort[index] & 0xFF] : methods[index];
+            }
+
+            @Override
+            public int size() {
+                return methods.length;
+            }
+        };
+    }
 
     /**
      * Returns a list of names for all interfaces this class implements. This list may be empty, but never null.
@@ -542,19 +613,126 @@ public final class ClassInfo implements AnnotationTarget {
         this.hasNoArgsConstructor = hasNoArgsConstructor;
     }
 
+    private static <T> int search(T key, T[] array, byte[] sort, Comparator<? super T> c) {
+        if (array.length <= MAX_LINEAR) {
+            // simulate bsearch contract with a linear search
+
+            int leastGreater = -1;
+            for (int i = 0; i < array.length; i++) {
+                int cmp = c.compare(array[i], key);
+                if (cmp == 0) {
+                    return i;
+                }
+                if (cmp > 0) {
+                    if (leastGreater == -1) {
+                        leastGreater = i;
+                    } else if (c.compare(array[leastGreater], array[i]) < 0) {
+                        leastGreater = i;
+                    }
+                }
+            }
+
+            return leastGreater == -1 ? -array.length : -(leastGreater + 1);
+        } else if (sort != null) {
+            return bsearchIndirect(key, array, sort, c);
+        }
+
+        return Arrays.binarySearch(array, key, c);
+    }
+
+
+    private static <T> int bsearchIndirect(T key, T[] array, byte[] sort, Comparator<? super T> c) {
+        int low = 0;
+        int high = sort.length - 1;
+
+        while (low <= high) {
+            int mid = (low + high) >>> 1;
+            int cmp = c.compare(array[sort[mid] & 0xFF], key);
+            if (cmp < 0) {
+                low = mid + 1;
+            } else if (cmp > 0) {
+                high = mid - 1;
+            } else {
+                return mid;
+            }
+        }
+
+        return -(low + 1);
+    }
+
+
+    private static <T> T lookupMember(int i, T[] array, byte[] sort) {
+        return sort != null ? lookupMemberIndirect(i, array, sort) : array[i];
+    }
+
+    private static <T> T lookupMemberIndirect(int i, T[] array, byte[] sort) {
+        return i < 0 ? null : array[sort[i] & 0xFF];
+    }
+
+    static class FieldWrapper implements Comparable<FieldWrapper> {
+        FieldInternal field;
+        byte order;
+
+        FieldWrapper(FieldInternal field, byte order) {
+            this.field = field;
+            this.order = order;
+        }
+
+        @Override
+        public int compareTo(FieldWrapper o) {
+            return FieldInternal.NAME_COMPARATOR.compare(field, o.field);
+        }
+    }
+
+    static class MethodWrapper implements Comparable<MethodWrapper> {
+        MethodInternal method;
+        byte order;
+
+        MethodWrapper(MethodInternal method, byte order) {
+            this.method = method;
+            this.order = order;
+        }
+
+        @Override
+        public int compareTo(MethodWrapper o) {
+            return MethodInternal.NAME_AND_PARAMETER_COMPONENT_COMPARATOR.compare(method, o.method);
+        }
+    }
+
     void setFields(List<FieldInfo> fields, NameTable names) {
-        if (fields.size() == 0) {
+        int size = fields.size();
+        if (size == 0) {
             this.fields = FieldInternal.EMPTY_ARRAY;
             return;
         }
-        this.fields = new FieldInternal[fields.size()];
-        for (int i = 0; i < fields.size(); i++) {
+
+        FieldInternal[] newFields = new FieldInternal[size];
+        this.fields = newFields;
+
+        for (int i = 0; i < size; i++) {
             FieldInfo fieldInfo = fields.get(i);
             FieldInternal internal = names.intern(fieldInfo.fieldInternal());
             fieldInfo.setFieldInternal(internal);
-            this.fields[i] = internal;
+            newFields[i] = internal;
         }
-        Arrays.sort(this.fields, FieldInternal.NAME_COMPARATOR);
+
+        if (size > MAX_LINEAR && size < MAX_DECL_RETAIN) {
+            // TODO - Optimize this to a bsearch insert sort to avoid
+            //        wrapper allocations.
+            FieldWrapper[] sortedFields = new FieldWrapper[size];
+            for (int i = 0; i < size; i++) {
+                sortedFields[i] = new FieldWrapper(newFields[i], (byte)i);
+            }
+
+            Arrays.sort(sortedFields);
+            byte[] sort = new byte[size];
+            this.fieldSort = sort;
+            for (int i = 0; i < size; i++) {
+                sort[i] = sortedFields[i].order;
+            }
+        } else if (size >= MAX_DECL_RETAIN) {
+            Arrays.sort(newFields, FieldInternal.NAME_COMPARATOR);
+        }
     }
 
     void setFieldArray(FieldInternal[] fields) {
@@ -566,19 +744,39 @@ public final class ClassInfo implements AnnotationTarget {
     }
 
     void setMethods(List<MethodInfo> methods, NameTable names) {
-        if (methods.size() == 0) {
+        int size = methods.size();
+        if (size == 0) {
             this.methods = MethodInternal.EMPTY_ARRAY;
             return;
         }
 
-        this.methods = new MethodInternal[methods.size()];
-        for (int i = 0; i < methods.size(); i++) {
+        MethodInternal[] newMethods = new MethodInternal[size];
+        this.methods = newMethods;
+        for (int i = 0; i < size; i++) {
             MethodInfo methodInfo = methods.get(i);
             MethodInternal internal = names.intern(methodInfo.methodInternal());
             methodInfo.setMethodInternal(internal);
-            this.methods[i] = internal;
+            newMethods[i] = internal;
         }
-        Arrays.sort(this.methods, MethodInternal.NAME_AND_PARAMETER_COMPONENT_COMPARATOR);
+
+        if (size > MAX_LINEAR && size < MAX_DECL_RETAIN) {
+            // TODO - Optimize this to a bsearch insert sort to avoid
+            //        wrapper allocations.
+            MethodWrapper[] sortedMethods = new MethodWrapper[size];
+            for (int i = 0; i < size; i++) {
+                sortedMethods[i] = new MethodWrapper(newMethods[i], (byte)i);
+            }
+
+            Arrays.sort(sortedMethods);
+
+            byte[] sort = new byte[size];
+            this.methodSort = sort;
+            for (int i = 0; i < size; i++) {
+                sort[i] = sortedMethods[i].order;
+            }
+        } else if (size >= MAX_DECL_RETAIN) {
+            Arrays.sort(newMethods, MethodInternal.NAME_AND_PARAMETER_COMPONENT_COMPARATOR);
+        }
     }
 
     void setSuperClassType(Type superClassType) {

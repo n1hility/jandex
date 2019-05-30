@@ -45,7 +45,7 @@ import java.util.Map;
  */
 final class IndexReaderV2 extends IndexReaderImpl {
     static final int MIN_VERSION = 6;
-    static final int MAX_VERSION = 9;
+    static final int MAX_VERSION = 10;
     static final int MAX_DATA_VERSION = 4;
     private static final byte NULL_TARGET_TAG = 0;
     private static final byte FIELD_TAG = 1;
@@ -72,6 +72,9 @@ final class IndexReaderV2 extends IndexReaderImpl {
     private static final int AVALUE_ARRAY = 12;
     private static final int AVALUE_NESTED = 13;
     private static final int HAS_ENCLOSING_METHOD = 1;
+    private static final int HAS_NESTING = 1;
+    private static final int HAS_FIELD_SORT = 1 << 3;
+    private static final int HAS_METHOD_SORT = 1 << 4;
     private final static byte[] INIT_METHOD_NAME = Utils.toUTF8("<init>");
 
     private PackedDataInputStream input;
@@ -498,11 +501,17 @@ final class IndexReaderV2 extends IndexReaderImpl {
 
         boolean hasEnclosingMethod = false;
         boolean hasNesting = false;
+        boolean hasFieldSort = false;
+        boolean hasMethodSort = false;
         if (version >= 9) {
-            int nestingMask = stream.readUnsignedByte();
-            if (nestingMask > 0) {
+            int mask = stream.readUnsignedByte();
+            if ((mask & 1) == 1) {
                 hasNesting = true;
-                hasEnclosingMethod = ((nestingMask & 2) == 2);
+                hasEnclosingMethod = ((mask & 2) == 2);
+            }
+            if (version >= 10) {
+                hasFieldSort = (mask & HAS_FIELD_SORT) > 0;
+                hasMethodSort = (mask & HAS_METHOD_SORT) > 0;
             }
         } else {
             hasEnclosingMethod = hasNesting = true;
@@ -533,9 +542,19 @@ final class IndexReaderV2 extends IndexReaderImpl {
 
         FieldInternal[] fields = readClassFields(stream, clazz);
         clazz.setFieldArray(fields);
+        if (hasFieldSort) {
+            byte[] fieldSort = new byte[fields.length];
+            stream.readFully(fieldSort);
+            clazz.setFieldSortArray(fieldSort);
+        }
 
         MethodInternal[] methods = readClassMethods(stream, clazz);
         clazz.setMethodArray(methods);
+        if (hasMethodSort) {
+            byte[] methodSort = new byte[methods.length];
+            stream.readFully(methodSort);
+            clazz.setMethodSortArray(methodSort);
+        }
 
         for (int i = 0; i < size; i++) {
             List<AnnotationInstance> instances = convertToList(readAnnotations(stream, clazz));
