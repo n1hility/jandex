@@ -131,7 +131,7 @@
         <dependency>
             <groupId>org.jboss.jandex</groupId>
             <artifactId>typeannotation-test</artifactId>
-            <version>1.1</version>
+            <version>1.2</version>
             <type>jar</type>
             <scope>test</scope>
         </dependency>
@@ -149,14 +149,6 @@
             <scope>test</scope>
         </dependency>
     </dependencies>
-    <profiles>
-        <profile>
-            <id>java8-tests</id>
-            <modules>
-                <module>java8-tests</module>
-            </modules>
-        </profile>
-    </profiles>
     <repositories>
         <repository>
             <id>jboss-public-repository</id>
