@@ -986,7 +986,7 @@ public final class Indexer {
         }
 
         if (last == null) {
-            throw new IllegalStateException("Required class information is missing");
+            throw new IllegalStateException("Required class information is missing ---test---:" + typeAnnotationState.target.enclosingTarget().asClass().name().toString());
         }
 
         return last;
