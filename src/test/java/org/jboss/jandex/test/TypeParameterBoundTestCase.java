@@ -72,6 +72,16 @@ public class TypeParameterBoundTestCase {
                 info.typeParameters().get(0).toString());
     }
 
+
+    @Test
+    public void classExtendsOnInner() throws IOException {
+        Indexer indexer = new Indexer();
+        ClassInfo info = indexer.index(getClassBytes("test/TypeParameterBoundExample$IteratorSupplier.class"));
+        //Assert.assertEquals(
+          //      "T extends @Nullable java.util.List & @Untainted java.io.Serializable",
+            //    info.typeParameters().get(0).toString());
+    }
+
     @Test
     public void serializableListConsumerDA() throws IOException {
         Indexer indexer = new Indexer();
